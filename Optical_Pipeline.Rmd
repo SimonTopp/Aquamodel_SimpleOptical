@@ -22,11 +22,11 @@ library(viridis)
 library(Hmisc)
 library(ggpmisc)
 library(lubridate)
+library(xgboost)
 
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
 ```
 
-## Munge the train/test data and bring in a couple functions
 ```{r cars}
 ## Dominant wavelength function
 fui.hue <- function(R, G, B) {
@@ -103,11 +103,27 @@ srMunged <- srMunged %>%
   mutate(NR = nir/red,
          BG = blue/green,
          dWL = fui.hue(red, green, blue))
+
+##Pull 20% as holdout data, make sure it's regionally representative
+set.seed(340987)
+holdOut <- srMunged %>%
+  group_by(region) %>%
+  sample_frac(.2)
+
+## Remove holdout data and add time groups to create folds
+df <- srMunged %>% filter(!UniqueID %in% holdOut$UniqueID) %>%
+  mutate(julian = as.numeric(julian.Date(date)),
+  timeCluster = cut_number(julian, 5))
+
+## Choose whatever optical inputs you want
+## As a  side note NR, BG, and dWL are least sensitive to changes in atmoshperic optical depth
+features <- "blue, green, red, nir, NR, BG, dWL"
+features <- str_split(features, pattern = ', ') %>% unlist()
 ```
 
-## Train the model
 
-```{r pressure, echo=FALSE}
+
+```{r pressure, eval = F, include = F}
 ## Choose whatever optical inputs you want
 ## As a  side note NR, BG, and dWL are least sensitive to changes in atmoshperic optical depth
 features <- "blue, green, red, nir, NR, BG, dWL"
@@ -155,7 +171,7 @@ train_control <- caret::trainControl(method="cv", savePredictions = F,
 
 # Do space-time cv across the tuning grid to find the best model
 model_train <- caret::train(
-  x = df %>% select(all_of(features)),
+  x = df %>% select(features),
   y = df$value,
   trControl = train_control,
   tuneGrid = grid_train,
@@ -173,6 +189,13 @@ model_train$bestTune
     #  100      1   0.5   0.05
 
 ## Build the final model based on the hypertuning above
+
+grid_final <- expand.grid(
+  nrounds = 100,
+  alpha = 0.5,
+  lambda = 1,
+  eta = 0.05)
+
 grid_final <- expand.grid(
   nrounds = model_train$bestTune$nrounds,
   alpha = model_train$bestTune$alpha,
@@ -181,7 +204,7 @@ grid_final <- expand.grid(
   
 
 model_final <- caret::train(
-  x = df %>% select(all_of(features)),
+  x = df %>% select(features),
   y = df$value,
   trControl = train_control,
   tuneGrid = grid_final,
@@ -198,7 +221,7 @@ save(model_final, file = 'models/gbLinear_OpticalModel.Rdata')
 ## Look at some validation
 
 ```{r}
-model <- load('models/gbLinear_OpticalModel.Rdata')
+load('models/gbLinear_OpticalModel.Rdata')
 
 output <- tibble(Actual = holdOut$value, Predicted = predict(model_final, holdOut[,features]), UniqueID = holdOut$UniqueID)
 
@@ -273,7 +296,7 @@ output.full %>% group_by(year) %>%
 
 
 # Take a look at feature importance
-model_final$modelInfo$varImp(model$finalModel) %>%
+model_final$modelInfo$varImp(model_final$finalModel) %>%
   mutate(Feature = fct_reorder(rownames(.), Overall, .desc = T)) %>%
   arrange(Overall) %>%
   ggplot(., aes(x = Feature, y = Overall)) + 
@@ -285,7 +308,7 @@ model_final$modelInfo$varImp(model$finalModel) %>%
 
 ## Example prediction code
 
-```{r}
+```{r, eval = F, include = F}
 ## Munge your pulled reflectance values and standardize them
 #####  Note, for this to work you need all 3 sensor represented in the csv
 ##### you're only predicting on Landsat 8 say, you'll need to alter this function
